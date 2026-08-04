@@ -39,7 +39,7 @@ TARGET_POSTAL_CODES = [
 ]
 
 STATE_FILE = Path(__file__).parent / "state.json"
-MAX_PAGES = 15          # garde-fou pour éviter une boucle infinie
+HARD_PAGE_CAP = 300     # garde-fou de sécurité uniquement (évite une boucle infinie en cas de bug)
 REQUEST_TIMEOUT = 20    # secondes
 DELAY_BETWEEN_PAGES = 1 # secondes, pour rester correct vis-à-vis du site
 
@@ -103,27 +103,47 @@ def matches_target_area(listing: dict) -> bool:
     return any(code in listing["text"] for code in TARGET_POSTAL_CODES)
 
 
+def get_total_pages(html_text: str) -> int:
+    """Déduit le nombre total de pages de résultats à partir des liens de
+    pagination présents sur une page (ex: liens vers ?page=12, "Dernière page").
+    Retourne 1 si aucun lien de pagination n'est trouvé (résultats tenant sur
+    une seule page)."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    max_page = 1
+    for link in soup.find_all("a", href=True):
+        match = re.search(r"[?&]page=(\d+)", link["href"])
+        if match:
+            max_page = max(max_page, int(match.group(1)))
+    return max_page
+
+
 def collect_matching_listings() -> dict[str, dict]:
     matches: dict[str, dict] = {}
-    page = 1
 
-    while page <= MAX_PAGES:
+    try:
+        first_page_html = fetch_page(1)
+    except requests.RequestException as exc:
+        print(f"Erreur réseau page 1 : {exc}")
+        return matches
+
+    total_pages = min(get_total_pages(first_page_html), HARD_PAGE_CAP)
+    print(f"{total_pages} page(s) de résultats détectée(s) au total.")
+
+    for item in parse_listings(first_page_html):
+        if matches_target_area(item):
+            matches[item["id"]] = item
+
+    for page in range(2, total_pages + 1):
+        time.sleep(DELAY_BETWEEN_PAGES)
         try:
             html_text = fetch_page(page)
         except requests.RequestException as exc:
             print(f"Erreur réseau page {page} : {exc}")
-            break
+            continue
 
-        listings = parse_listings(html_text)
-        if not listings:
-            break
-
-        for item in listings:
+        for item in parse_listings(html_text):
             if matches_target_area(item):
                 matches[item["id"]] = item
-
-        page += 1
-        time.sleep(DELAY_BETWEEN_PAGES)
 
     return matches
 
